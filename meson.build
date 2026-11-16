@@ -35,6 +35,9 @@ speex_incs = include_directories('include', 'include/speex')
 
 cdata = configuration_data()
 
+opus_dep = dependency('opus', required: get_option('opus'))
+cdata.set('HAVE_OPUS', opus_dep.found())
+
 add_project_arguments('-DHAVE_CONFIG_H=1', language: 'c')
 
 cdata.set_quoted('SPEEX_VERSION', speex_version,

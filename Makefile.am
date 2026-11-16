@@ -13,7 +13,7 @@ pkgconfig_DATA = speex.pc
 
 MESON_FILES = meson.build meson_options.txt doc/meson.build src/meson.build libspeex/meson.build libspeex/speex.def include/speex/meson.build
 
-EXTRA_DIST = Speex.spec Speex.spec.in Speex.kdevelop speex.m4 speex.pc.in README.blackfin README.symbian README.TI-DSP $(MESON_FILES)
+EXTRA_DIST = Speex.spec Speex.spec.in Speex.kdevelop speex.m4 speex.pc.in README.blackfin README.symbian README.TI-DSP doc/opus_interop.md $(MESON_FILES)
 
 #Fools KDevelop into including all files
 SUBDIRS = libspeex include doc win32 symbian ti

@@ -213,6 +213,9 @@ extern "C" {
 /** modeID for the defined ultra-wideband mode */
 #define SPEEX_MODEID_UWB 2
 
+/** modeID for the optional Opus receive-side adapter */
+#define SPEEX_MODEID_OPUS 3
+
 struct SpeexMode;
 
 

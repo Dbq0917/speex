@@ -83,6 +83,7 @@
 #include "speex/speex_header.h"
 #include "speex/speex_stereo.h"
 #include "speex/speex_callbacks.h"
+#include "speex/speex_opus.h"
 
 #define MAX_FRAME_SIZE 2000
 
@@ -250,6 +251,232 @@ FILE *out_file_open(char *outFile, int rate, int *channels)
    return fout;
 }
 
+static int opus_le16(const unsigned char *p)
+{
+   return (int)p[0] | ((int)p[1] << 8);
+}
+
+static void opus_emit_pcm(FILE *fout, char *outFile, short *pcm,
+                          short *le_pcm, int samples, int channels,
+                          int *audio_size)
+{
+   int i;
+   if (samples <= 0)
+      return;
+   for (i = 0; i < samples * channels; i++)
+      le_pcm[i] = le_short(pcm[i]);
+#if defined WIN32 || defined _WIN32
+   if (strlen(outFile) == 0)
+      WIN_Play_Samples(le_pcm, sizeof(short) * samples * channels);
+   else
+#endif
+      fwrite(le_pcm, sizeof(short), (size_t)samples * channels, fout);
+   *audio_size += (int)sizeof(short) * samples * channels;
+}
+
+static int decode_opus_ogg(FILE *fin, char *outFile, int wav_format,
+                           float loss_percent, int quiet, int opus_info,
+                           int forced_rate, int forced_channels)
+{
+   ogg_sync_state oy;
+   ogg_stream_state os;
+   ogg_page og;
+   ogg_packet op;
+   SpeexOpusDecoder *dec = NULL;
+   SpeexOpusPacketInfo last_info;
+   FILE *fout = NULL;
+   short *pcm = NULL;
+   short *le_pcm = NULL;
+   int header_seen = 0, stream_init = 0, eos = 0;
+   int channels = 1, rate, pre_skip = 0, audio_size = 0;
+   int trim = 0;
+   long long produced = 0;
+   int result = 1;
+
+   memset(&last_info, 0, sizeof(last_info));
+   rate = forced_rate ? forced_rate : 48000;
+   if (rate != 8000 && rate != 12000 && rate != 16000 &&
+       rate != 24000 && rate != 48000) {
+      fprintf(stderr, "Opus output rate must be 8000, 12000, 16000, 24000 or 48000 Hz\n");
+      return 1;
+   }
+
+   ogg_sync_init(&oy);
+   while (!eos) {
+      char *data = ogg_sync_buffer(&oy, 4096);
+      int nb_read = (int)fread(data, 1, 4096, fin);
+      if (nb_read < 0)
+         break;
+      ogg_sync_wrote(&oy, nb_read);
+
+      while (ogg_sync_pageout(&oy, &og) == 1) {
+         if (!stream_init) {
+            ogg_stream_init(&os, ogg_page_serialno(&og));
+            stream_init = 1;
+         } else if (ogg_page_serialno(&og) != os.serialno) {
+            continue;
+         }
+         ogg_stream_pagein(&os, &og);
+
+         while (ogg_stream_packetout(&os, &op) == 1) {
+            if (!header_seen) {
+               if (op.bytes < 19 || memcmp(op.packet, "OpusHead", 8) != 0) {
+                  result = 2;
+                  goto done;
+               }
+               if ((op.packet[8] >> 4) != 0) {
+                  fprintf(stderr, "Unsupported Opus version %d\n", op.packet[8]);
+                  goto done;
+               }
+               channels = op.packet[9];
+               if (channels != 1 && channels != 2) {
+                  fprintf(stderr, "Unsupported Opus channel count %d\n", channels);
+                  goto done;
+               }
+               if (forced_channels == 1 || forced_channels == 2) {
+                  if (forced_channels != channels && !quiet)
+                     fprintf(stderr, "Downmixing Opus %d channels to %d\n",
+                             channels, forced_channels);
+                  channels = forced_channels;
+               }
+               if (op.packet[18] != 0) {
+                  fprintf(stderr, "Unsupported Opus mapping family %d\n",
+                          op.packet[18]);
+                  goto done;
+               }
+               pre_skip = opus_le16((const unsigned char *)op.packet + 10);
+               trim = (int)((long long)pre_skip * rate / 48000);
+               dec = speex_opus_decoder_init(rate, channels);
+               if (!dec) {
+                  fprintf(stderr, "Opus decoder initialization failed\n");
+                  goto done;
+               }
+               fout = out_file_open(outFile, rate, &channels);
+               pcm = (short *)malloc((size_t)SPEEX_OPUS_MAX_FRAME_SAMPLES *
+                                     channels * sizeof(*pcm));
+               le_pcm = (short *)malloc((size_t)SPEEX_OPUS_MAX_FRAME_SAMPLES *
+                                        channels * sizeof(*le_pcm));
+               if (!pcm || !le_pcm) {
+                  fprintf(stderr, "Out of memory\n");
+                  goto done;
+               }
+               header_seen = 1;
+               if (!quiet)
+                  fprintf(stderr, "Decoding Opus %d Hz, %d channel%s\n",
+                          rate, channels, channels == 1 ? "" : "s");
+               continue;
+            }
+
+            if (op.bytes >= 8 && !memcmp(op.packet, "OpusTags", 8))
+               continue;
+
+            {
+               SpeexOpusPacketInfo info;
+               int n;
+               int lost = loss_percent > 0 &&
+                          100.0 * rand() / RAND_MAX < loss_percent;
+               long long granule = op.granulepos >= 0 ? op.granulepos : -1;
+               long long target_end = -1;
+
+               if (granule >= 0)
+                  target_end = ((long long)granule - pre_skip) * rate / 48000;
+               if (lost) {
+                  n = speex_opus_decode_loss(dec,
+                           last_info.packet_duration_us ? last_info.packet_duration_us :
+                           20000, pcm,
+                           SPEEX_OPUS_MAX_FRAME_SAMPLES);
+                  if (n < 0)
+                     goto done;
+               } else {
+                  n = speex_opus_decode(dec, op.packet, op.bytes, pcm,
+                                        SPEEX_OPUS_MAX_FRAME_SAMPLES, &info);
+                  if (n < 0) {
+                     fprintf(stderr, "Opus decode error %d\n", n);
+                     goto done;
+                  }
+                  last_info = info;
+
+                  if (target_end >= 0) {
+                     long long expected_start = target_end - n;
+                     if (expected_start > produced) {
+                        long long missing = expected_start - produced;
+                        int lost_n = speex_opus_decode_loss(dec,
+                              (int)(missing * 1000000 / rate), pcm,
+                              SPEEX_OPUS_MAX_FRAME_SAMPLES);
+                        if (lost_n < 0)
+                           goto done;
+                        if (opus_info && !quiet)
+                           fprintf(stderr, "opus conceal duration_us=%lld\n",
+                                   missing * 1000000 / rate);
+                        opus_emit_pcm(fout, outFile, pcm, le_pcm, lost_n,
+                                      channels, &audio_size);
+                        produced += lost_n;
+                        last_info = info;
+                     }
+                  }
+               }
+
+               if (trim > 0) {
+                  int skip = trim < n ? trim : n;
+                  memmove(pcm, pcm + skip * channels,
+                          (size_t)(n - skip) * channels * sizeof(*pcm));
+                  n -= skip;
+                  trim -= skip;
+               }
+               if (target_end >= 0 && produced + n > target_end)
+                  n = target_end > produced ? (int)(target_end - produced) : 0;
+
+               if (n > 0) {
+                  opus_emit_pcm(fout, outFile, pcm, le_pcm, n, channels,
+                                &audio_size);
+                  produced += n;
+               }
+               if (opus_info && !quiet)
+                  fprintf(stderr, "opus packet frames=%d frame_us=%d "
+                          "rate=%d duration_us=%d concealed=%d\n",
+                          last_info.frames_per_packet,
+                          last_info.frame_duration_us,
+                          last_info.sample_rate,
+                          last_info.packet_duration_us,
+                          last_info.concealed);
+               if (op.e_o_s)
+                  eos = 1;
+            }
+         }
+      }
+      if (nb_read == 0)
+         break;
+   }
+
+   if (fout && wav_format) {
+      if (fseek(fout, 4, SEEK_SET) == 0) {
+         int tmp = le_int(audio_size + 36);
+         fwrite(&tmp, 4, 1, fout);
+         if (fseek(fout, 32, SEEK_CUR) == 0) {
+            tmp = le_int(audio_size);
+            fwrite(&tmp, 4, 1, fout);
+         }
+      }
+   }
+   result = 0;
+
+done:
+   if (dec)
+      speex_opus_decoder_destroy(dec);
+   free(pcm);
+   free(le_pcm);
+   if (stream_init)
+      ogg_stream_clear(&os);
+   ogg_sync_clear(&oy);
+#if defined WIN32 || defined _WIN32
+   if (strlen(outFile) == 0)
+      WIN_Audio_close();
+#endif
+   if (fout)
+      fclose(fout);
+   return result;
+}
+
 void usage()
 {
    printf ("Usage: speexdec [options] input_file.spx [output_file]\n");
@@ -276,6 +503,7 @@ void usage()
    printf (" --stereo              Force decoding in stereo\n");
    printf (" --rate n              Force decoding at sampling rate n Hz\n");
    printf (" --packet-loss n       Simulate n %% random packet loss\n");
+   printf (" --opus-info           Print per-packet Opus timing metadata\n");
    printf (" -V                    Verbose mode (show bit-rate)\n");
    printf (" -h, --help            This help\n");
    printf (" -v, --version         Version information\n");
@@ -453,6 +681,7 @@ int main(int argc, char **argv)
       {"mono", no_argument, NULL, 0},
       {"stereo", no_argument, NULL, 0},
       {"packet-loss", required_argument, NULL, 0},
+      {"opus-info", no_argument, NULL, 0},
       {0, 0, 0, 0}
    };
    ogg_sync_state oy;
@@ -474,6 +703,9 @@ int main(int argc, char **argv)
    int wav_format=0;
    int lookahead;
    int speex_serialno = -1;
+   int opus_info = 0;
+   unsigned char magic[8];
+   int magic_len = 0;
 
    enh_enabled = 1;
 
@@ -538,6 +770,9 @@ int main(int argc, char **argv)
          } else if (strcmp(long_options[option_index].name,"packet-loss")==0)
          {
             loss_percent = atof(optarg);
+         } else if (strcmp(long_options[option_index].name,"opus-info")==0)
+         {
+            opus_info = 1;
          }
          break;
       case 'h':
@@ -590,6 +825,41 @@ int main(int argc, char **argv)
       close_in=1;
    }
 
+   magic_len = (int)fread(magic, 1, sizeof(magic), fin);
+   if (magic_len == (int)sizeof(magic) &&
+       (!memcmp(magic, "OpusHead", 8) || !memcmp(magic, "OggS", 4)))
+   {
+      int rc;
+      if (fseek(fin, 0, SEEK_SET) != 0)
+      {
+         /* Non-seekable Speex input: feed the prefix to the Ogg parser. */
+         if (memcmp(magic, "OpusHead", 8) == 0)
+         {
+            fprintf(stderr, "Cannot rewind Opus input\n");
+            if (close_in)
+               fclose(fin);
+            return 1;
+         }
+      }
+      else
+      {
+         rc = decode_opus_ogg(fin, outFile, wav_format, loss_percent, quiet,
+                              opus_info, rate, channels);
+         if (rc != 2)
+         {
+            if (close_in)
+               fclose(fin);
+            return rc;
+         }
+         if (fseek(fin, 0, SEEK_SET) != 0)
+         {
+            if (close_in)
+               fclose(fin);
+            return 1;
+         }
+         magic_len = 0;
+      }
+   }
 
    /*Init Ogg data struct*/
    ogg_sync_init(&oy);
@@ -601,18 +871,26 @@ int main(int argc, char **argv)
    {
       char *data;
       int i, j, nb_read;
-      /*Get the ogg buffer for writing*/
-      data = ogg_sync_buffer(&oy, 200);
-      /*Read bitstream from input file*/
-      nb_read = fread(data, sizeof(char), 200, fin);
-      if (nb_read < 200 ) {
-         int err = ferror(fin);
-         if (err) {
-            fprintf(stderr, "Read error: %s\n", strerror(err));
-            break;
+      if (magic_len > 0) {
+         data = ogg_sync_buffer(&oy, magic_len);
+         memcpy(data, magic, magic_len);
+         ogg_sync_wrote(&oy, magic_len);
+         nb_read = magic_len;
+         magic_len = 0;
+      } else {
+         /*Get the ogg buffer for writing*/
+         data = ogg_sync_buffer(&oy, 200);
+         /*Read bitstream from input file*/
+         nb_read = fread(data, sizeof(char), 200, fin);
+         if (nb_read < 200 ) {
+            int err = ferror(fin);
+            if (err) {
+               fprintf(stderr, "Read error: %s\n", strerror(err));
+               break;
+            }
          }
+         ogg_sync_wrote(&oy, nb_read);
       }
-      ogg_sync_wrote(&oy, nb_read);
 
       /*Loop for all complete pages we got (most likely only one)*/
       while (ogg_sync_pageout(&oy, &og)==1)

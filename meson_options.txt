@@ -16,6 +16,9 @@ option('float-api', type: 'feature', value: 'enabled',
 option('tools', type: 'feature', value: 'auto',
        description: 'Build speex command line tools')
 
+option('opus', type: 'feature', value: 'auto',
+       description: 'Build the Opus receive-side adapter when libopus is available')
+
 option('valgrind', type: 'feature', value: 'disabled',
        description: 'Enable valgrind extra checks')
 

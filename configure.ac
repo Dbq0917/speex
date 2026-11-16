@@ -169,6 +169,19 @@ AS_IF([test "x$enable_binaries" != "xno"], [
      AM_CONDITIONAL([BUILD_BINARIES], false)])],
   [AM_CONDITIONAL([BUILD_BINARIES], false)])
 
+AC_ARG_ENABLE(opus, [  --disable-opus         Disable the Opus receive-side adapter],
+[if test "$enableval" = no; then
+  opus_disabled=yes
+fi])
+AS_IF([test "x$opus_disabled" = "xyes"], [
+  have_opus=no
+], [
+  PKG_CHECK_MODULES([OPUS], [opus],
+    [have_opus=yes; AC_DEFINE([HAVE_OPUS], [], [Build the Opus receive-side adapter])],
+    [have_opus=no; AC_MSG_WARN([Opus not found, Opus receive-side adapter disabled])])
+])
+AM_CONDITIONAL([BUILD_OPUS], [test "x$have_opus" = "xyes"])
+
 AC_ARG_ENABLE(vbr, [  --disable-vbr           Disable VBR and VAD from the codec],
 [if test "$enableval" = no; then
   AC_DEFINE([DISABLE_VBR], , [Disable VBR and VAD from the codec])

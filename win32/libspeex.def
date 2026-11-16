@@ -74,3 +74,20 @@ speex_encode_stereo_int
 speex_decode_stereo
 speex_decode_stereo_int
 speex_std_stereo_request_handler
+
+;
+;	speex_opus.h
+;
+speex_opus_packet_parse
+speex_opus_decoder_init
+speex_opus_decoder_create
+speex_opus_decoder_configure
+speex_opus_decoder_destroy
+speex_opus_decoder_free
+speex_opus_decode
+speex_opus_decode_packet
+speex_opus_decode_loss
+speex_opus_decoder_get_info
+speex_opus_decoder_ctl
+speex_opus_decoder_get_latency_us
+speex_opus_mode

@@ -37,6 +37,7 @@
 #endif
 
 #include "modes.h"
+#include "speex/speex_opus.h"
 #include <math.h>
 #include "os_support.h"
 
@@ -116,11 +117,25 @@ EXPORT int speex_decode(void *state, SpeexBits *bits, float *out)
 {
    int i, ret;
    spx_int32_t N;
-   spx_int16_t short_out[MAX_IN_SAMPLES];
+   spx_int16_t short_out_stack[MAX_IN_SAMPLES];
+   spx_int16_t *short_out = short_out_stack;
+   SpeexMode *mode = *(SpeexMode**)state;
    speex_decoder_ctl(state, SPEEX_GET_FRAME_SIZE, &N);
-   ret = (*((SpeexMode**)state))->dec(state, bits, short_out);
+   if (N > MAX_IN_SAMPLES)
+   {
+      short_out = (spx_int16_t*)speex_alloc(N*sizeof(*short_out));
+      if (!short_out)
+         return -1;
+   }
+   ret = mode->dec(state, bits, short_out);
+   if (ret == 0 && mode->modeID == SPEEX_MODEID_OPUS)
+      speex_decoder_ctl(state, SPEEX_OPUS_GET_LAST_FRAME_SIZE, &N);
+   if (ret != 0)
+      N = 0;
    for (i=0;i<N;i++)
       out[i] = short_out[i];
+   if (short_out != short_out_stack)
+      speex_free(short_out);
    return ret;
 }
 #endif /* #ifndef DISABLE_FLOAT_API */
@@ -158,12 +173,22 @@ EXPORT int speex_decode_int(void *state, SpeexBits *bits, spx_int16_t *out)
 {
    int i;
    spx_int32_t N;
-   float float_out[MAX_IN_SAMPLES];
+   float float_out_stack[MAX_IN_SAMPLES];
+   float *float_out = float_out_stack;
+   SpeexMode *mode = *(SpeexMode**)state;
    int ret;
    speex_decoder_ctl(state, SPEEX_GET_FRAME_SIZE, &N);
-   ret = (*((SpeexMode**)state))->dec(state, bits, float_out);
+   if (N > MAX_IN_SAMPLES)
+   {
+      float_out = (float*)speex_alloc(N*sizeof(*float_out));
+      if (!float_out)
+         return -1;
+   }
+   ret = mode->dec(state, bits, float_out);
    if (ret == 0)
    {
+      if (mode->modeID == SPEEX_MODEID_OPUS)
+         speex_decoder_ctl(state, SPEEX_OPUS_GET_LAST_FRAME_SIZE, &N);
       for (i=0;i<N;i++)
       {
          if (float_out[i]>32767.f)
@@ -174,6 +199,8 @@ EXPORT int speex_decode_int(void *state, SpeexBits *bits, spx_int16_t *out)
             out[i] = (spx_int16_t)floor(.5+float_out[i]);
       }
    }
+   if (float_out != float_out_stack)
+      speex_free(float_out);
    return ret;
 }
 #endif

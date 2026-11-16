@@ -44,6 +44,7 @@
 #include "nb_celp.h"
 #include "vbr.h"
 #include "arch.h"
+#include "speex/speex_opus.h"
 #include <math.h>
 #include "os_support.h"
 
@@ -313,6 +314,8 @@ EXPORT const SpeexMode speex_uwb_mode = {
 
 EXPORT const SpeexMode * speex_lib_get_mode (int mode)
 {
+   if (mode == SPEEX_MODEID_OPUS)
+      return &speex_opus_mode;
    if (mode < 0 || mode >= SPEEX_NB_MODES) return NULL;
 
    return speex_mode_list[mode];

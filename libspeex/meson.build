@@ -25,6 +25,7 @@ speex_sources = files([
   'modes.c',
   'modes_wb.c',
   'nb_celp.c',
+  'opus_adapter.c',
   'quant_lsp.c',
   'sb_celp.c',
   'speex_callbacks.c',
@@ -51,7 +52,7 @@ libm = cc.find_library('m', required: false)
 
 libspeex = library('speex', speex_sources, speex_config_types_h,
   include_directories: [config_inc, speex_incs],
-  dependencies: [fft_dep, libm],
+  dependencies: [fft_dep, libm, opus_dep],
   gnu_symbol_visibility: 'hidden',
   vs_module_defs: 'speex.def',
   version: libversion,
@@ -67,7 +68,8 @@ pkg = import('pkgconfig')
 pkg.generate(libspeex,
   name: 'speex',
   description: 'Speex is an audio codec tuned for speech',
-  version: meson.project_version())
+  version: meson.project_version(),
+  requires_private: opus_dep.found() ? ['opus'] : [])
 
 if not get_option('test-binaries').disabled()
   foreach bin : ['testenc', 'testenc_wb', 'testenc_uwb']
@@ -76,4 +78,12 @@ if not get_option('test-binaries').disabled()
       dependencies: [speex_dep, libm],
       install: false)
   endforeach
+endif
+
+if opus_dep.found() and not get_option('test-binaries').disabled()
+  opus_adapter_test = executable('test_opus_adapter', 'test_opus_adapter.c',
+    include_directories: config_inc,
+    dependencies: [speex_dep, opus_dep, libm],
+    install: false)
+  test('opus-adapter', opus_adapter_test, timeout: 60)
 endif
